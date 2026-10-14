@@ -551,6 +551,16 @@ func updateByReschedulable(alloc *structs.Allocation, now time.Time, evalID stri
 	return
 }
 
+func filterServerTerminalAllocs(all allocSet) (remaining allocSet) {
+	remaining = make(map[string]*structs.Allocation)
+	for id, alloc := range all {
+		if !alloc.ServerTerminalStatus() {
+			remaining[id] = alloc
+		}
+	}
+	return
+}
+
 // filterByTerminal filters out terminal allocs
 func filterByTerminal(untainted allocSet) (nonTerminal allocSet) {
 	nonTerminal = make(map[string]*structs.Allocation)

@@ -4837,7 +4837,11 @@ func TestReconciler_Batch_Rerun(t *testing.T) {
 		alloc.Name = structs.AllocName(job.ID, job.TaskGroups[0].Name, uint(i))
 		alloc.TaskGroup = job.TaskGroups[0].Name
 		alloc.ClientStatus = structs.AllocClientStatusComplete
-		alloc.DesiredStatus = structs.AllocDesiredStatusStop
+		if i%2 == 0 {
+			alloc.DesiredStatus = structs.AllocDesiredStatusStop
+		} else {
+			alloc.DesiredStatus = structs.AllocDesiredStatusRun
+		}
 		allocs = append(allocs, alloc)
 	}
 
@@ -4859,7 +4863,7 @@ func TestReconciler_Batch_Rerun(t *testing.T) {
 			job.TaskGroups[0].Name: {
 				Place:             10,
 				DestructiveUpdate: 0,
-				Ignore:            10,
+				Ignore:            5,
 			},
 		},
 	})
@@ -5463,7 +5467,7 @@ func TestReconciler_Disconnected_Client(t *testing.T) {
 				desiredTGUpdates: map[string]*structs.DesiredUpdates{
 					"web": {
 						Stop:   2,
-						Ignore: 7,
+						Ignore: 5,
 					},
 				},
 			},
@@ -5944,7 +5948,7 @@ func TestReconciler_Client_Disconnect_Canaries(t *testing.T) {
 					updatedJob.TaskGroups[0].Name: {
 						Place:  3,
 						Canary: 0,
-						Ignore: 6,
+						Ignore: 3,
 					},
 				},
 			},
@@ -6008,7 +6012,7 @@ func TestReconciler_Client_Disconnect_Canaries(t *testing.T) {
 					updatedJob.TaskGroups[0].Name: {
 						Place:  2,
 						Canary: 0,
-						Ignore: 7,
+						Ignore: 4,
 					},
 				},
 			},
@@ -6074,7 +6078,7 @@ func TestReconciler_Client_Disconnect_Canaries(t *testing.T) {
 					updatedJob.TaskGroups[0].Name: {
 						Place:  2,
 						Canary: 0,
-						Ignore: 6,
+						Ignore: 3,
 						// The 2 stops in this test are transient failures, but
 						// the deployment can still progress. We don't include
 						// them in the stop count since DesiredTGUpdates is used

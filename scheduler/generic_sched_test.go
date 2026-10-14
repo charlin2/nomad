@@ -1915,7 +1915,7 @@ func TestServiceSched_JobModify(t *testing.T) {
 	job2.TaskGroups[0].Tasks[0].Config["command"] = "/bin/other"
 	require.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job2))
 
-	// Create a mock evaluation to deal with drain
+	// Create a mock evaluation
 	eval := &structs.Evaluation{
 		Namespace:   structs.DefaultNamespace,
 		ID:          uuid.Generate(),
@@ -2308,7 +2308,7 @@ func TestServiceSched_JobModify_Datacenters(t *testing.T) {
 	job2.Datacenters = []string{"dc1", "dc2"}
 	require.NoError(h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job2))
 
-	// Create a mock evaluation to deal with drain
+	// Create a mock evaluation
 	eval := &structs.Evaluation{
 		Namespace:   structs.DefaultNamespace,
 		ID:          uuid.Generate(),
@@ -2381,7 +2381,7 @@ func TestServiceSched_JobModify_IncrCount_NodeLimit(t *testing.T) {
 	job2.TaskGroups[0].Count = 3
 	require.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job2))
 
-	// Create a mock evaluation to deal with drain
+	// Create a mock evaluation
 	eval := &structs.Evaluation{
 		Namespace:   structs.DefaultNamespace,
 		ID:          uuid.Generate(),
@@ -2492,7 +2492,7 @@ func TestServiceSched_JobModify_CountZero(t *testing.T) {
 	job2.TaskGroups[0].Count = 0
 	require.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job2))
 
-	// Create a mock evaluation to deal with drain
+	// Create a mock evaluation
 	eval := &structs.Evaluation{
 		Namespace:   structs.DefaultNamespace,
 		ID:          uuid.Generate(),
@@ -2590,7 +2590,7 @@ func TestServiceSched_JobModify_Rolling(t *testing.T) {
 	job2.TaskGroups[0].Tasks[0].Config["command"] = "/bin/other"
 	require.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job2))
 
-	// Create a mock evaluation to deal with drain
+	// Create a mock evaluation
 	eval := &structs.Evaluation{
 		Namespace:   structs.DefaultNamespace,
 		ID:          uuid.Generate(),
@@ -2821,7 +2821,7 @@ func TestServiceSched_JobModify_Canaries(t *testing.T) {
 	job2.TaskGroups[0].Tasks[0].Config["command"] = "/bin/other"
 	require.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job2))
 
-	// Create a mock evaluation to deal with drain
+	// Create a mock evaluation
 	eval := &structs.Evaluation{
 		Namespace:   structs.DefaultNamespace,
 		ID:          uuid.Generate(),
@@ -2964,7 +2964,7 @@ func TestServiceSched_JobModify_InPlace(t *testing.T) {
 	}
 	require.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job2))
 
-	// Create a mock evaluation to deal with drain
+	// Create a mock evaluation
 	eval := &structs.Evaluation{
 		Namespace:   structs.DefaultNamespace,
 		ID:          uuid.Generate(),
@@ -3605,7 +3605,7 @@ func TestServiceSched_NodeDown(t *testing.T) {
 			allocs := []*structs.Allocation{alloc}
 			must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), allocs))
 
-			// Create a mock evaluation to deal with drain
+			// Create a mock evaluation
 			eval := &structs.Evaluation{
 				Namespace:   structs.DefaultNamespace,
 				ID:          uuid.Generate(),
@@ -4094,6 +4094,117 @@ func TestServiceSched_NodeDrain_Down(t *testing.T) {
 	}
 
 	h.AssertEvalStatus(t, structs.EvalStatusComplete)
+}
+
+func TestServiceSched_NodeDrain_Canaries(t *testing.T) {
+	ci.Parallel(t)
+	h := NewHarness(t)
+
+	n1 := mock.Node()
+	n2 := mock.DrainNode()
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), n1))
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), n2))
+
+	job := mock.Job()
+	job.TaskGroups[0].Count = 2
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job))
+
+	// previous version allocations
+	var allocs []*structs.Allocation
+	for i := 0; i < 2; i++ {
+		alloc := mock.Alloc()
+		alloc.Job = job
+		alloc.JobID = job.ID
+		alloc.NodeID = n1.ID
+		alloc.Name = fmt.Sprintf("my-job.web[%d]", i)
+		allocs = append(allocs, alloc)
+		t.Logf("prev alloc=%q", alloc.ID)
+	}
+
+	// canaries on draining node
+	job = job.Copy()
+	job.Meta["owner"] = "changed"
+	job.Version++
+	var canaries []string
+	for i := 0; i < 2; i++ {
+		alloc := mock.Alloc()
+		alloc.Job = job
+		alloc.JobID = job.ID
+		alloc.NodeID = n2.ID
+		alloc.Name = fmt.Sprintf("my-job.web[%d]", i)
+		alloc.DesiredStatus = structs.AllocDesiredStatusStop
+		alloc.ClientStatus = structs.AllocClientStatusComplete
+		alloc.DeploymentStatus = &structs.AllocDeploymentStatus{
+			Healthy: pointer.Of(false),
+			Canary:  true,
+		}
+		alloc.DesiredTransition = structs.DesiredTransition{
+			Migrate: pointer.Of(true),
+		}
+		allocs = append(allocs, alloc)
+		canaries = append(canaries, alloc.ID)
+		t.Logf("stopped canary alloc=%q", alloc.ID)
+	}
+
+	// first canary placed from previous drainer eval
+	alloc := mock.Alloc()
+	alloc.Job = job
+	alloc.JobID = job.ID
+	alloc.NodeID = n2.ID
+	alloc.Name = fmt.Sprintf("my-job.web[0]")
+	alloc.ClientStatus = structs.AllocClientStatusRunning
+	alloc.PreviousAllocation = canaries[0]
+	alloc.DeploymentStatus = &structs.AllocDeploymentStatus{
+		Healthy: pointer.Of(false),
+		Canary:  true,
+	}
+	allocs = append(allocs, alloc)
+	canaries = append(canaries, alloc.ID)
+	t.Logf("new canary alloc=%q", alloc.ID)
+
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job))
+	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), allocs))
+
+	deployment := mock.Deployment()
+	deployment.JobID = job.ID
+	deployment.JobVersion = job.Version
+	deployment.JobCreateIndex = job.CreateIndex
+	deployment.JobSpecModifyIndex = job.JobModifyIndex
+	deployment.TaskGroups["web"] = &structs.DeploymentState{
+		AutoRevert:      false,
+		AutoPromote:     false,
+		Promoted:        false,
+		PlacedCanaries:  canaries,
+		DesiredCanaries: 2,
+		DesiredTotal:    2,
+		PlacedAllocs:    3,
+		HealthyAllocs:   0,
+		UnhealthyAllocs: 0,
+	}
+	must.NoError(t, h.State.UpsertDeployment(h.NextIndex(), deployment))
+
+	eval := &structs.Evaluation{
+		Namespace:   structs.DefaultNamespace,
+		ID:          uuid.Generate(),
+		Priority:    50,
+		TriggeredBy: structs.EvalTriggerNodeUpdate,
+		JobID:       job.ID,
+		NodeID:      n2.ID,
+		Status:      structs.EvalStatusPending,
+	}
+	must.NoError(t, h.State.UpsertEvals(structs.MsgTypeTestSetup,
+		h.NextIndex(), []*structs.Evaluation{eval}))
+
+	must.NoError(t, h.Process(NewServiceScheduler, eval))
+	must.Len(t, 1, h.Plans)
+	h.AssertEvalStatus(t, structs.EvalStatusComplete)
+	must.MapLen(t, 0, h.Plans[0].NodeAllocation)
+	must.MapLen(t, 1, h.Plans[0].NodeUpdate)
+	must.Len(t, 2, h.Plans[0].NodeUpdate[n2.ID])
+
+	for _, alloc := range h.Plans[0].NodeUpdate[n2.ID] {
+		must.SliceContains(t, canaries, alloc.ID)
+	}
 }
 
 func TestServiceSched_NodeDrain_Queued_Allocations(t *testing.T) {
@@ -4648,7 +4759,7 @@ func TestServiceSched_BlockedReschedule(t *testing.T) {
 	node := mock.Node()
 	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), node))
 
-	// Generate a fake job with an allocation and an update policy.
+	// Generate a fake job with a newly-failed allocation and an update policy.
 	job := mock.Job()
 	job.TaskGroups[0].Count = 1
 	delayDuration := 15 * time.Second
@@ -4696,8 +4807,8 @@ func TestServiceSched_BlockedReschedule(t *testing.T) {
 	// Process the evaluation and assert we have a plan
 	must.NoError(t, h.Process(NewServiceScheduler, eval))
 	must.Len(t, 1, h.Plans)
-	must.MapLen(t, 0, h.Plans[0].NodeUpdate)     // stop
-	must.MapLen(t, 1, h.Plans[0].NodeAllocation) // place
+	must.MapLen(t, 0, h.Plans[0].NodeUpdate)     // no stop
+	must.MapLen(t, 1, h.Plans[0].NodeAllocation) // ignore but update with follow-up eval
 
 	// Lookup the allocations by JobID and verify no new allocs created
 	ws := memdb.NewWatchSet()
@@ -4721,8 +4832,8 @@ func TestServiceSched_BlockedReschedule(t *testing.T) {
 	// in a replacement and stop
 	must.NoError(t, h.Process(NewServiceScheduler, followupEval))
 	must.Len(t, 2, h.Plans)
-	must.MapLen(t, 1, h.Plans[1].NodeUpdate)     // stop
-	must.MapLen(t, 1, h.Plans[1].NodeAllocation) // place
+	must.MapLen(t, 1, h.Plans[1].NodeUpdate)     // stop original
+	must.MapLen(t, 1, h.Plans[1].NodeAllocation) // place new
 
 	out, err = h.State.AllocsByJob(ws, job.Namespace, job.ID, false)
 	must.NoError(t, err)

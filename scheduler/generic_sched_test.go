@@ -2469,6 +2469,9 @@ func TestServiceSched_JobModify_CountZero(t *testing.T) {
 		alloc.JobID = job.ID
 		alloc.NodeID = nodes[i].ID
 		alloc.Name = structs.AllocName(alloc.JobID, alloc.TaskGroup, uint(i))
+		if i%2 == 0 {
+			alloc.ClientStatus = structs.AllocClientStatusFailed
+		}
 		allocs = append(allocs, alloc)
 	}
 	require.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), allocs))
@@ -4100,22 +4103,21 @@ func TestServiceSched_NodeDrain_Canaries(t *testing.T) {
 	ci.Parallel(t)
 	h := NewHarness(t)
 
-	n1 := mock.Node()
-	n2 := mock.DrainNode()
-	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), n1))
-	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), n2))
+	node := mock.Node()
+	drainedNode := mock.DrainNode()
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), node))
+	must.NoError(t, h.State.UpsertNode(structs.MsgTypeTestSetup, h.NextIndex(), drainedNode))
 
 	job := mock.Job()
 	job.TaskGroups[0].Count = 2
+	job.TaskGroups[0].Update = &structs.UpdateStrategy{Canary: 2}
 	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job))
 
 	// previous version allocations
 	var allocs []*structs.Allocation
-	for i := 0; i < 2; i++ {
-		alloc := mock.Alloc()
-		alloc.Job = job
-		alloc.JobID = job.ID
-		alloc.NodeID = n1.ID
+	for i := range 2 {
+		alloc := mock.MinAllocForJob(job)
+		alloc.NodeID = node.ID
 		alloc.Name = fmt.Sprintf("my-job.web[%d]", i)
 		allocs = append(allocs, alloc)
 		t.Logf("prev alloc=%q", alloc.ID)
@@ -4126,14 +4128,11 @@ func TestServiceSched_NodeDrain_Canaries(t *testing.T) {
 	job.Meta["owner"] = "changed"
 	job.Version++
 	var canaries []string
-	for i := 0; i < 2; i++ {
-		alloc := mock.Alloc()
-		alloc.Job = job
-		alloc.JobID = job.ID
-		alloc.NodeID = n2.ID
+
+	for i := range 2 {
+		alloc := mock.MinAllocForJob(job)
+		alloc.NodeID = drainedNode.ID
 		alloc.Name = fmt.Sprintf("my-job.web[%d]", i)
-		alloc.DesiredStatus = structs.AllocDesiredStatusStop
-		alloc.ClientStatus = structs.AllocClientStatusComplete
 		alloc.DeploymentStatus = &structs.AllocDeploymentStatus{
 			Healthy: pointer.Of(false),
 			Canary:  true,
@@ -4143,24 +4142,30 @@ func TestServiceSched_NodeDrain_Canaries(t *testing.T) {
 		}
 		allocs = append(allocs, alloc)
 		canaries = append(canaries, alloc.ID)
-		t.Logf("stopped canary alloc=%q", alloc.ID)
+		t.Logf("canary on draining node=%q", alloc.ID)
 	}
 
-	// first canary placed from previous drainer eval
-	alloc := mock.Alloc()
-	alloc.Job = job
-	alloc.JobID = job.ID
-	alloc.NodeID = n2.ID
-	alloc.Name = fmt.Sprintf("my-job.web[0]")
-	alloc.ClientStatus = structs.AllocClientStatusRunning
-	alloc.PreviousAllocation = canaries[0]
-	alloc.DeploymentStatus = &structs.AllocDeploymentStatus{
+	deadCanary := allocs[2]
+	deadCanary.DesiredStatus = structs.AllocDesiredStatusStop
+	deadCanary.ClientStatus = structs.AllocClientStatusComplete
+
+	canaryToDrain := allocs[3]
+	canaryToDrain.DesiredStatus = structs.AllocDesiredStatusRun
+	canaryToDrain.ClientStatus = structs.AllocClientStatusRunning
+
+	// replacement canary placed from previous eval
+	replacement := mock.MinAllocForJob(job)
+	replacement.NodeID = node.ID
+	replacement.Name = fmt.Sprintf("my-job.web[0]")
+	replacement.ClientStatus = structs.AllocClientStatusRunning
+	replacement.PreviousAllocation = canaries[0]
+	replacement.DeploymentStatus = &structs.AllocDeploymentStatus{
 		Healthy: pointer.Of(false),
 		Canary:  true,
 	}
-	allocs = append(allocs, alloc)
-	canaries = append(canaries, alloc.ID)
-	t.Logf("new canary alloc=%q", alloc.ID)
+	allocs = append(allocs, replacement)
+	canaries = append(canaries, replacement.ID)
+	t.Logf("replacement canary alloc=%q", replacement.ID)
 
 	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job))
 	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), allocs))
@@ -4184,13 +4189,14 @@ func TestServiceSched_NodeDrain_Canaries(t *testing.T) {
 	must.NoError(t, h.State.UpsertDeployment(h.NextIndex(), deployment))
 
 	eval := &structs.Evaluation{
-		Namespace:   structs.DefaultNamespace,
-		ID:          uuid.Generate(),
-		Priority:    50,
-		TriggeredBy: structs.EvalTriggerNodeUpdate,
-		JobID:       job.ID,
-		NodeID:      n2.ID,
-		Status:      structs.EvalStatusPending,
+		Namespace:    structs.DefaultNamespace,
+		ID:           uuid.Generate(),
+		Priority:     50,
+		TriggeredBy:  structs.EvalTriggerNodeUpdate,
+		JobID:        job.ID,
+		NodeID:       drainedNode.ID,
+		Status:       structs.EvalStatusPending,
+		AnnotatePlan: true,
 	}
 	must.NoError(t, h.State.UpsertEvals(structs.MsgTypeTestSetup,
 		h.NextIndex(), []*structs.Evaluation{eval}))
@@ -4198,13 +4204,14 @@ func TestServiceSched_NodeDrain_Canaries(t *testing.T) {
 	must.NoError(t, h.Process(NewServiceScheduler, eval))
 	must.Len(t, 1, h.Plans)
 	h.AssertEvalStatus(t, structs.EvalStatusComplete)
-	must.MapLen(t, 0, h.Plans[0].NodeAllocation)
-	must.MapLen(t, 1, h.Plans[0].NodeUpdate)
-	must.Len(t, 2, h.Plans[0].NodeUpdate[n2.ID])
 
-	for _, alloc := range h.Plans[0].NodeUpdate[n2.ID] {
-		must.SliceContains(t, canaries, alloc.ID)
-	}
+	must.MapLen(t, 1, h.Plans[0].NodeAllocation)
+	must.Len(t, 1, h.Plans[0].NodeAllocation[node.ID])
+	must.Eq(t, 1, h.Plans[0].Annotations.DesiredTGUpdates["web"].Canary)
+
+	must.MapLen(t, 1, h.Plans[0].NodeUpdate)
+	must.Len(t, 1, h.Plans[0].NodeUpdate[drainedNode.ID])
+	must.Eq(t, canaryToDrain.ID, h.Plans[0].NodeUpdate[drainedNode.ID][0].ID)
 }
 
 func TestServiceSched_NodeDrain_Queued_Allocations(t *testing.T) {
